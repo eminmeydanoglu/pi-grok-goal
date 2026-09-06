@@ -4,7 +4,7 @@ Recorded on 2026-09-06 with Pi 0.85.1 and `pi-subagents` 0.65.1. UUIDs below are
 
 | Scenario | Result | Evidence |
 |---|---|---|
-| Normal success | PASS | Workflow `24b8c0b9-a72f-4c0e-adb1-8c19c88b7672` completed after planner, worker, and unanimous fresh panel. |
+| Normal success | PASS | Final workflow goal `249f070d-50a3-48dc-8a34-55aff2a323bb` completed after worker `3f67e5f1-6b78-477e-b69b-8a7df6eb5ca0` and skeptics `2b78304d-6d25-4fbd-99b1-76b72c7865b1`, `567f34e5-bdbd-40ba-b27b-97a30d700e80`, and `018bc080-2729-41b5-a178-742a7a382772`. |
 | False completion | PASS | Workflow `0346fd01…`: candidate was rejected for packaging/Git gaps; gaps persisted and the retained worker resumed. |
 | Same worker resume | PASS | Initial and resumed runs used the same persisted child `session.jsonl`; continuation run handles changed while retained session identity did not. |
 | Verifier isolation | PASS | Distinct skeptic runs used only `read`, `find`/`ls`, `verify_command`, and `structured_output`; no worker transcript, shell, edit, or write tools. |
