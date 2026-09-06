@@ -1,1 +1,1 @@
-{"name":"e2e-fixture","version":"0.1.0","description":"A small JavaScript fixture package for adding two numbers.","type":"module","license":"MIT","files":["src/sum.js","test/sum.test.js","README.md"],"scripts":{"test":"node --test test/sum.test.js"}}
+{"name":"e2e-fixture","version":"0.1.0","description":"A small JavaScript fixture package for adding two numbers.","type":"module","license":"MIT","files":["src/sum.js","src/subtract.js","test/sum.test.js","test/subtract.test.js","README.md"],"scripts":{"test":"node --test test/*.test.js"}}
