@@ -1,0 +1,5 @@
+node_modules/
+.inspect-pi-subagents/
+.upstream-pi-subagents/
+*.tgz
+coverage/
