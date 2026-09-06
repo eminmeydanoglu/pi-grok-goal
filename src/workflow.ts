@@ -15,6 +15,7 @@ export function buildGoalWorkflow(input: { goalId: string; generation: number; o
 const meta=${q({goalId,generation})};
 const budgets=${q(budgets)};
 const objective=${q(objective)};
+const persist=(value)=>state.get("goal").then(current=>{if(current&&current.goalId===meta.goalId&&(current.generation!==meta.generation||current.status==="cancelled"))throw new Error("STALE_GOAL_RESULT");return state.set("goal",value);});
 try{
 const saved=await state.get("goal");
 let contract;
@@ -38,7 +39,7 @@ else{
 const immutableContract=JSON.stringify(contract);
 const normalize=(s)=>s.toLowerCase().normalize("NFKD").replace(/[\\u0300-\\u036f]/g,"").replace(/[^a-z0-9]+/g," ").trim().split(/\\s+/).filter(Boolean).sort().slice(0,12).join("-");
 const fingerprint=(gaps)=>Array.from(new Set(gaps.map(g=>(g.criterionId||"OBJECTIVE").toUpperCase()+":"+normalize(g.problem)))).sort().join("|");
-await state.set("goal",{version:1,...meta,objective,status:"working",contract,workPlan,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,sameGapCount,strategistCount,budgets,updatedAt:new Date().toISOString()});
+await persist({version:1,...meta,objective,status:"working",contract,workPlan,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,sameGapCount,strategistCount,budgets,updatedAt:new Date().toISOString()});
 while(workerIteration<budgets.maxWorkerIterations&&verificationAttempt<budgets.maxVerificationRounds){
  workerIteration++;
  const workerTask=${q(WORKER_PROMPT)}+"\\n\\nIMMUTABLE CONTRACT:\\n"+immutableContract+"\\n\\nWORK PLAN:\\n"+JSON.stringify(workPlan)+"\\n\\nPRIOR GAPS:\\n"+JSON.stringify(priorGaps)+"\\n\\nSTRATEGY:\\n"+JSON.stringify(strategy);
@@ -50,18 +51,18 @@ while(workerIteration<budgets.maxWorkerIterations&&verificationAttempt<budgets.m
  workPlan=worker.structuredOutput.workPlan;
  if(JSON.stringify(contract)!==immutableContract)throw new Error("Immutable contract mutation detected");
  verificationAttempt++;
- await state.set("goal",{version:1,...meta,objective,status:"verifying",contract,workPlan,workerRunId,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,updatedAt:new Date().toISOString()});
+ await persist({version:1,...meta,objective,status:"verifying",contract,workPlan,workerRunId,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,updatedAt:new Date().toISOString()});
  const verifierTask=${q(SKEPTIC_PROMPT)}+"\\n\\nGOAL TAG:\\n"+JSON.stringify({...meta,verificationAttempt})+"\\n\\nIMMUTABLE CONTRACT:\\n"+immutableContract+"\\n\\nCURRENT WORK PLAN:\\n"+JSON.stringify(workPlan)+"\\n\\nWORKER CLAIM (UNTRUSTED):\\n"+JSON.stringify(worker.structuredOutput)+"\\n\\nPRIOR GAPS:\\n"+JSON.stringify(priorGaps);
  const panel=await runs.all([0,1,2].map(i=>({key:"skeptic-"+verificationAttempt+"-"+i,agent:"goal-skeptic",context:"fresh",task:verifierTask+"\\nYou are skeptic "+(i+1)+".",outputSchema:${q(verdictSchema)}})));
  if(panel.length!==3||panel.some(r=>!r.ok||!r.structuredOutput)){
-  await state.set("goal",{version:1,...meta,objective,status:"infra-paused",contract,workPlan,workerRunId,workerIteration,verificationAttempt,verifierRunIds:panel.map(r=>r.runId).filter(Boolean),priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,pauseReason:"Verifier infrastructure or structured-output failure",updatedAt:new Date().toISOString()});
+  await persist({version:1,...meta,objective,status:"infra-paused",contract,workPlan,workerRunId,workerIteration,verificationAttempt,verifierRunIds:panel.map(r=>r.runId).filter(Boolean),priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,pauseReason:"Verifier infrastructure or structured-output failure",updatedAt:new Date().toISOString()});
   return {outcome:"infra-paused",goalId:meta.goalId,generation:meta.generation,workerRunId};
  }
  const verdicts=panel.map(r=>r.structuredOutput);
  const gaps=verdicts.flatMap(v=>v.gaps);
  if(verdicts.every(v=>v.achieved&&v.gaps.length===0)){
   const completionResult={independentlyVerified:true,at:new Date().toISOString(),verdicts};
-  await state.set("goal",{version:1,...meta,objective,status:"complete",contract,workPlan,workerRunId,workerIteration,verificationAttempt,verifierRunIds:panel.map(r=>r.runId),priorVerificationGaps:[],sameGapCount,strategistCount,strategy,budgets,completionResult,updatedAt:new Date().toISOString()});
+  await persist({version:1,...meta,objective,status:"complete",contract,workPlan,workerRunId,workerIteration,verificationAttempt,verifierRunIds:panel.map(r=>r.runId),priorVerificationGaps:[],sameGapCount,strategistCount,strategy,budgets,completionResult,updatedAt:new Date().toISOString()});
   return {outcome:"complete",goalId:meta.goalId,generation:meta.generation,workerRunId,verifierRunIds:panel.map(r=>r.runId),completionResult};
  }
  const fp=fingerprint(gaps);
@@ -71,23 +72,24 @@ while(workerIteration<budgets.maxWorkerIterations&&verificationAttempt<budgets.m
  priorGaps=gaps;
  if(sameGapCount>=budgets.strategistThreshold){
   if(strategistCount>=budgets.maxStrategistInvocations){
-   await state.set("goal",{version:1,...meta,objective,status:"no-progress",contract,workPlan,workerRunId,workerIteration,verificationAttempt,verifierRunIds:panel.map(r=>r.runId),priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,pauseReason:"Recurring semantic gaps after strategist budget",updatedAt:new Date().toISOString()});
+   await persist({version:1,...meta,objective,status:"no-progress",contract,workPlan,workerRunId,workerIteration,verificationAttempt,verifierRunIds:panel.map(r=>r.runId),priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,pauseReason:"Recurring semantic gaps after strategist budget",updatedAt:new Date().toISOString()});
    return {outcome:"no-progress",goalId:meta.goalId,generation:meta.generation,workerRunId,gaps};
   }
   strategistCount++;
-  await state.set("goal",{version:1,...meta,objective,status:"strategizing",contract,workPlan,workerRunId,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,budgets,updatedAt:new Date().toISOString()});
+  await persist({version:1,...meta,objective,status:"strategizing",contract,workPlan,workerRunId,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,budgets,updatedAt:new Date().toISOString()});
   const strategist=await runs.run("strategist-"+strategistCount,{agent:"goal-strategist",context:"fresh",task:${q(STRATEGIST_PROMPT)}+"\\n\\nIMMUTABLE CONTRACT:\\n"+immutableContract+"\\n\\nWORK PLAN:\\n"+JSON.stringify(workPlan)+"\\n\\nRECURRING GAPS:\\n"+JSON.stringify(priorGaps)+"\\n\\nWORKER SUMMARY:\\n"+worker.structuredOutput.summary,outputSchema:${q(strategySchema)}});
   if(!strategist.ok||!strategist.structuredOutput)throw new Error("Strategist structured output unavailable");
   strategy=strategist.structuredOutput;
  }
- await state.set("goal",{version:1,...meta,objective,status:"working",contract,workPlan,workerRunId,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,updatedAt:new Date().toISOString()});
+ await persist({version:1,...meta,objective,status:"working",contract,workPlan,workerRunId,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,updatedAt:new Date().toISOString()});
 }
-await state.set("goal",{version:1,...meta,objective,status:"budget-limited",contract,workPlan,workerRunId,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,pauseReason:"Worker or verification round budget exhausted",updatedAt:new Date().toISOString()});
+await persist({version:1,...meta,objective,status:"budget-limited",contract,workPlan,workerRunId,workerIteration,verificationAttempt,priorVerificationGaps:priorGaps,gapFingerprint:lastFingerprint,sameGapCount,strategistCount,strategy,budgets,pauseReason:"Worker or verification round budget exhausted",updatedAt:new Date().toISOString()});
 return {outcome:"budget-limited",goalId:meta.goalId,generation:meta.generation,workerRunId,gaps:priorGaps};
 }catch(error){
  const message=error&&error.message?error.message:String(error);
  const existing=await state.get("goal");
- await state.set("goal",{...(existing||{version:1,...meta,objective,workPlan:[],workerIteration:0,verificationAttempt:0,priorVerificationGaps:[],sameGapCount:0,strategistCount:0,budgets}),status:"infra-paused",pauseReason:message,updatedAt:new Date().toISOString()});
+ if(message==="STALE_GOAL_RESULT")return {outcome:"stale-ignored",goalId:meta.goalId,generation:meta.generation};
+ await persist({...(existing||{version:1,...meta,objective,workPlan:[],workerIteration:0,verificationAttempt:0,priorVerificationGaps:[],sameGapCount:0,strategistCount:0,budgets}),status:"infra-paused",pauseReason:message,updatedAt:new Date().toISOString()});
  return {outcome:"infra-paused",goalId:meta.goalId,generation:meta.generation,error:message};
 }`;
 }

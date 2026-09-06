@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildGoalWorkflow, DEFAULT_BUDGETS } from "./workflow.ts";
 import type { GoalSnapshot } from "./types.ts";
@@ -25,9 +26,9 @@ function rpc(pi: ExtensionAPI, method: string, params: Record<string, unknown>, 
   });
 }
 
-function registerAgent(pi: ExtensionAPI, name: string, description: string, systemPrompt: string, tools: readonly string[], completionGuard = true): () => void {
+function registerAgent(pi: ExtensionAPI, name: string, description: string, systemPrompt: string, tools: readonly string[], completionGuard = true, extra: Record<string,unknown> = {}): () => void {
   const request: {version:1;name:string;definition:Record<string,unknown>;result?:{ok:boolean;registration?:{dispose():void};error?:Error}} = {
-    version: 1, name, definition: { description, systemPrompt, tools: [...tools], completionGuard },
+    version: 1, name, definition: { description, systemPrompt, tools: [...tools], completionGuard, ...extra },
   };
   pi.events.emit(REGISTER_AGENT, request);
   if (!request.result?.ok || !request.result.registration) throw request.result?.error ?? new Error("pi-subagents is not installed or not ready");
@@ -84,7 +85,7 @@ export default function goalExtension(pi: ExtensionAPI) {
       workflowScript: buildGoalWorkflow({ goalId: goal.goalId, generation: goal.generation, objective: goal.objective, budgets: goal.snapshot?.budgets ?? DEFAULT_BUDGETS }),
       cwd: ctx.cwd, async: true, context: "fresh", model: "openai-codex/gpt-5.6-luna:medium",
       usageBudget: { tokens: { hard: goal.snapshot?.budgets.tokenBudget ?? DEFAULT_BUDGETS.tokenBudget } },
-      ...(resume && goal.missionId ? { missionId: goal.missionId } : { mission: { title: `Goal: ${goal.objective.slice(0, 120)}`, objective: goal.objective, goal: true, budget: { tokens: DEFAULT_BUDGETS.tokenBudget }, labels: ["pi-grok-goal", goal.goalId] } }),
+      ...(resume && goal.missionId ? { missionId: goal.missionId } : { mission: { title: `Goal: ${goal.objective.slice(0, 120)}`, objective: goal.objective, labels: ["pi-grok-goal", goal.goalId] } }),
     };
     const reply = await rpc(pi, "spawn", params);
     if (!reply.success) throw new Error(reply.error?.message ?? "Goal workflow launch failed");
@@ -105,11 +106,12 @@ export default function goalExtension(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     lastContext = ctx;
     disposers.forEach((d) => d());
+    const verifierToolPath=fileURLToPath(new URL("./verifier-tools.ts",import.meta.url));
     disposers = [
       registerAgent(pi,"goal-planner","Fresh acceptance-contract planner","Define an immutable, testable goal contract. Never implement.",["read","grep","find","ls","bash"],false),
       registerAgent(pi,"goal-worker","Retained coding worker","Implement the supplied immutable contract. Return a completion candidate, never a verdict.",["read","grep","find","ls","bash","edit","write"],false),
-      registerAgent(pi,"goal-skeptic","Fresh independent read-only verifier","Verify every criterion independently. Never mutate the workspace.",["read","grep","find","ls","bash"],false),
-      registerAgent(pi,"goal-strategist","Fresh read-only remediation strategist","Change HOW, never WHAT. Never implement.",["read","grep","find","ls","bash"],false),
+      registerAgent(pi,"goal-skeptic","Fresh independent read-only verifier","Verify every criterion independently. Never mutate the workspace.",["read","grep","find","ls","verify_command"],false,{subagentOnlyExtensions:[verifierToolPath]}),
+      registerAgent(pi,"goal-strategist","Fresh read-only remediation strategist","Change HOW, never WHAT. Never implement.",["read","grep","find","ls","verify_command"],false,{subagentOnlyExtensions:[verifierToolPath]}),
     ];
     loadPersisted();
   });
