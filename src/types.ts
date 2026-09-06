@@ -13,11 +13,25 @@ export interface GoalContract {
   verificationPlan: string[];
 }
 export interface Evidence { kind: "command" | "file" | "behavior" | "note"; description: string; value?: string }
+export type WorkerOutcome = "continue" | "candidate" | "blocked";
+export type WorkerDisposition = WorkerOutcome;
 export interface WorkerClaim {
-  completed: boolean; summary: string; claimedCriteria: string[]; evidence: Evidence[]; workPlan: string[];
+  /** Omitted only for backward-compatible old worker sessions. */
+  outcome?: WorkerOutcome;
+  /** `candidate` iff true; legacy omission maps true to candidate and false to continue. */
+  completed: boolean;
+  /** Mandatory when outcome is blocked; explains the external/user dependency. */
+  blockedReason?: string;
+  summary: string; claimedCriteria: string[]; evidence: Evidence[]; workPlan: string[];
 }
 export interface Gap { criterionId?: string; problem: string; evidence?: string }
-export interface VerificationVerdict { achieved: boolean; gaps: Gap[]; notes?: string[] }
+export interface VerificationVerdict { kind: "verdict"; achieved: boolean; gaps: Gap[]; notes?: string[] }
+export interface VerificationInfrastructure { kind: "infrastructure"; reason: string }
+export type VerificationResult = VerificationVerdict | VerificationInfrastructure;
+export type PanelResult =
+  | { kind: "verdict"; runId: string; verdict: VerificationVerdict }
+  | { kind: "infrastructure"; runId?: string; error: string };
+export interface PanelAggregate { outcome: "pass" | "fail" | "infra"; gaps: Gap[]; verdicts: VerificationVerdict[] }
 export interface Strategy { diagnosis: string; recommendedStrategy: string; avoidRepeating: string[] }
 export interface GoalBudgets {
   tokenBudget: number; maxWorkerIterations: number; maxVerificationRounds: number;

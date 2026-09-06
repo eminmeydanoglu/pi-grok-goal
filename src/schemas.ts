@@ -16,16 +16,22 @@ export const plannerSchema = {
 export const workerSchema = {
   type: "object", additionalProperties: false,
   properties: {
-    completed: {type:"boolean"}, summary: {type:"string"}, claimedCriteria: {type:"array", items:{type:"string"}},
+    outcome: {enum:["continue","candidate","blocked"]}, completed: {type:"boolean"}, blockedReason:{type:"string",minLength:1}, summary: {type:"string"}, claimedCriteria: {type:"array", items:{type:"string"}},
     evidence: {type:"array", maxItems:50, items:{type:"object", additionalProperties:false, properties:{kind:{enum:["command","file","behavior","note"]},description:{type:"string"},value:{type:"string"}},required:["kind","description"]}},
     workPlan: {type:"array", items:{type:"string"}},
   }, required:["completed","summary","claimedCriteria","evidence","workPlan"],
+  allOf:[
+    {if:{properties:{outcome:{const:"candidate"}},required:["outcome"]},then:{properties:{completed:{const:true}}}},
+    {if:{properties:{outcome:{const:"continue"}},required:["outcome"]},then:{properties:{completed:{const:false}}}},
+    {if:{properties:{outcome:{const:"blocked"}},required:["outcome"]},then:{properties:{completed:{const:false}},required:["blockedReason"]}},
+  ],
 } as const;
 
 export const verdictSchema = {
-  type:"object", additionalProperties:false,
-  properties:{achieved:{type:"boolean"},gaps:{type:"array",maxItems:30,items:{type:"object",additionalProperties:false,properties:{criterionId:{type:"string"},problem:{type:"string",minLength:1},evidence:{type:"string"}},required:["problem"]}},notes:{type:"array",items:{type:"string"}}},
-  required:["achieved","gaps"],
+  oneOf:[
+    {type:"object",additionalProperties:false,properties:{kind:{const:"verdict"},achieved:{type:"boolean"},gaps:{type:"array",maxItems:30,items:{type:"object",additionalProperties:false,properties:{criterionId:{type:"string"},problem:{type:"string",minLength:1},evidence:{type:"string"}},required:["problem"]}},notes:{type:"array",items:{type:"string"}}},required:["kind","achieved","gaps"],allOf:[{if:{properties:{achieved:{const:true}},required:["achieved"]},then:{properties:{gaps:{maxItems:0}}}}]},
+    {type:"object",additionalProperties:false,properties:{kind:{const:"infrastructure"},reason:{type:"string",minLength:1}},required:["kind","reason"]},
+  ],
 } as const;
 
 export const strategySchema = {
