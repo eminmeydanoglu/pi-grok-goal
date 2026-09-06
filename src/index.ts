@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildGoalWorkflow, DEFAULT_BUDGETS } from "./workflow.ts";
@@ -14,6 +14,23 @@ const REGISTER_AGENT = "pi-subagents:runtime-agent-register:v1";
 
 interface ActiveGoal { goalId: string; generation: number; objective: string; missionId?: string; asyncRunId?: string; snapshot?: GoalSnapshot }
 interface RpcReply { success: boolean; data?: { text?: string; details?: Record<string, unknown> }; error?: {message?:string} }
+
+async function updateMissionLifecycle(cwd:string,missionId:string,snapshot:GoalSnapshot):Promise<void>{
+  const store=await import(new URL("./src/missions/store.ts",import.meta.resolve("pi-subagents")).href) as {
+    resolveMissionStoreLocation(input:{projectRoot:string}):unknown;
+    updateMission(location:unknown,id:string,update:Record<string,unknown>):unknown;
+  };
+  const location=store.resolveMissionStoreLocation({projectRoot:cwd});
+  if(snapshot.status==="complete") store.updateMission(location,missionId,{status:"completed",goal:false,summary:"Goal independently verified"});
+  else if(snapshot.status==="cancelled") store.updateMission(location,missionId,{status:"cancelled",goal:false,summary:"Goal cleared by user"});
+  else if(["paused","no-progress","infra-paused","budget-limited","blocked"].includes(snapshot.status)) store.updateMission(location,missionId,{status:"waiting",goal:{status:"paused"},summary:snapshot.pauseReason??snapshot.status});
+  else store.updateMission(location,missionId,{status:"active",goal:{status:"active"}});
+}
+
+function configuredBudgets() {
+  const integer=(name:string,fallback:number)=>{const parsed=Number.parseInt(process.env[name]??"",10);return Number.isSafeInteger(parsed)&&parsed>0?parsed:fallback;};
+  return {...DEFAULT_BUDGETS,tokenBudget:integer("PI_GOAL_TOKEN_BUDGET",DEFAULT_BUDGETS.tokenBudget),maxWorkerIterations:integer("PI_GOAL_MAX_WORKER_ITERATIONS",DEFAULT_BUDGETS.maxWorkerIterations),maxVerificationRounds:integer("PI_GOAL_MAX_VERIFICATION_ROUNDS",DEFAULT_BUDGETS.maxVerificationRounds),maxStrategistInvocations:integer("PI_GOAL_MAX_STRATEGISTS",DEFAULT_BUDGETS.maxStrategistInvocations),strategistThreshold:integer("PI_GOAL_STRATEGIST_THRESHOLD",DEFAULT_BUDGETS.strategistThreshold),infraRetries:integer("PI_GOAL_INFRA_RETRIES",DEFAULT_BUDGETS.infraRetries),wallClockMs:integer("PI_GOAL_WALL_CLOCK_MS",DEFAULT_BUDGETS.wallClockMs)};
+}
 
 function rpc(pi: ExtensionAPI, method: string, params: Record<string, unknown>, timeoutMs = 20_000): Promise<RpcReply> {
   return new Promise((resolve, reject) => {
@@ -35,15 +52,13 @@ function registerAgent(pi: ExtensionAPI, name: string, description: string, syst
   return () => request.result?.registration?.dispose();
 }
 
-function findLatestSnapshot(): { snapshot: GoalSnapshot; missionId: string } | undefined {
-  const root = join(homedir(), ".pi", "agent", "missions", "projects");
+function findLatestSnapshot(cwd: string): { snapshot: GoalSnapshot; missionId: string } | undefined {
+  const projectKey=createHash("sha256").update(resolve(cwd)).digest("hex");
+  const root = join(homedir(), ".pi", "agent", "missions", "projects", projectKey);
   if (!existsSync(root)) return undefined;
   let latest: {snapshot:GoalSnapshot;missionId:string;mtime:number}|undefined;
-  for (const project of readdirSync(root)) {
-    const projectDir = join(root, project);
-    if (!statSync(projectDir).isDirectory()) continue;
-    for (const missionId of readdirSync(projectDir)) {
-      const statePath = join(projectDir, missionId, "state.json");
+    for (const missionId of readdirSync(root)) {
+      const statePath = join(root, missionId, "state.json");
       if (!existsSync(statePath)) continue;
       try {
         const state = JSON.parse(readFileSync(statePath, "utf8")) as {goal?:GoalSnapshot};
@@ -52,7 +67,6 @@ function findLatestSnapshot(): { snapshot: GoalSnapshot; missionId: string } | u
         if (!latest || mtime > latest.mtime) latest = {snapshot:state.goal,missionId,mtime};
       } catch { /* Ignore unrelated/corrupt mission records. */ }
     }
-  }
   return latest && {snapshot:latest.snapshot,missionId:latest.missionId};
 }
 
@@ -75,18 +89,22 @@ export default function goalExtension(pi: ExtensionAPI) {
   let lastContext: ExtensionContext | undefined;
 
   const loadPersisted = () => {
-    const found = findLatestSnapshot();
+    if (!lastContext) return;
+    const found = findLatestSnapshot(lastContext.cwd);
     if (!found || ["cancelled"].includes(found.snapshot.status)) return;
     active = { goalId: found.snapshot.goalId, generation: found.snapshot.generation, objective: found.snapshot.objective, missionId: found.missionId, snapshot: found.snapshot };
   };
 
   const launch = async (ctx: ExtensionContext, goal: ActiveGoal, resume: boolean) => {
+    const budgets=goal.snapshot?.budgets??configuredBudgets();
     const params: Record<string, unknown> = {
-      workflowScript: buildGoalWorkflow({ goalId: goal.goalId, generation: goal.generation, objective: goal.objective, budgets: goal.snapshot?.budgets ?? DEFAULT_BUDGETS }),
-      cwd: ctx.cwd, async: true, context: "fresh", model: "openai-codex/gpt-5.6-luna:medium",
-      usageBudget: { tokens: { hard: goal.snapshot?.budgets.tokenBudget ?? DEFAULT_BUDGETS.tokenBudget } },
-      ...(resume && goal.missionId ? { missionId: goal.missionId } : { mission: { title: `Goal: ${goal.objective.slice(0, 120)}`, objective: goal.objective, labels: ["pi-grok-goal", goal.goalId] } }),
+      workflowScript: buildGoalWorkflow({ goalId: goal.goalId, generation: goal.generation, objective: goal.objective, budgets }),
+      cwd: ctx.cwd, async: true, context: "fresh",
+      usageBudget: { tokens: { hard: budgets.tokenBudget } }, timeoutMs:budgets.wallClockMs,
+      ...(resume && goal.missionId ? { missionId: goal.missionId } : { mission: { title: `Goal: ${goal.objective.slice(0, 120)}`, objective: goal.objective, goal:true, budget:{tokens:budgets.tokenBudget}, labels: ["pi-grok-goal", goal.goalId] } }),
     };
+    if(process.env.PI_GOAL_MODEL) params.model=process.env.PI_GOAL_MODEL;
+    if(resume&&goal.missionId&&goal.snapshot) await updateMissionLifecycle(ctx.cwd,goal.missionId,{...goal.snapshot,status:"working"});
     const reply = await rpc(pi, "spawn", params);
     if (!reply.success) throw new Error(reply.error?.message ?? "Goal workflow launch failed");
     const details = reply.data?.details ?? {};
@@ -97,10 +115,12 @@ export default function goalExtension(pi: ExtensionAPI) {
 
   const persistControlState = async (ctx: ExtensionContext, goal: ActiveGoal, status: "paused"|"cancelled") => {
     if (!goal.missionId || !goal.snapshot) return;
-    const snapshot = {...goal.snapshot,status,generation: status === "cancelled" ? goal.generation + 1 : goal.generation,pauseReason:status === "paused"?"Paused by user":"Cleared by user",updatedAt:new Date().toISOString()};
+    const snapshot = {...goal.snapshot,status,generation:goal.generation+1,pauseReason:status === "paused"?"Paused by user":"Cleared by user",updatedAt:new Date().toISOString()};
+    goal.generation=snapshot.generation;
     goal.snapshot = snapshot;
-    const script = `await state.set("goal",${JSON.stringify(snapshot)});return ${JSON.stringify({outcome:status})};`;
-    await rpc(pi,"spawn",{workflowScript:script,cwd:ctx.cwd,async:true,missionId:goal.missionId,context:"fresh"});
+    const store=await import(new URL("./src/missions/store.ts",import.meta.resolve("pi-subagents")).href) as {resolveMissionStoreLocation(input:{projectRoot:string}):unknown};
+    const workflowState=await import(new URL("./src/missions/workflow-state.ts",import.meta.resolve("pi-subagents")).href) as {createMissionWorkflowState(location:unknown,id:string):{set(key:string,value:unknown):void}};
+    workflowState.createMissionWorkflowState(store.resolveMissionStoreLocation({projectRoot:ctx.cwd}),goal.missionId).set("goal",snapshot);
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -108,20 +128,23 @@ export default function goalExtension(pi: ExtensionAPI) {
     disposers.forEach((d) => d());
     const verifierToolPath=fileURLToPath(new URL("./verifier-tools.ts",import.meta.url));
     disposers = [
-      registerAgent(pi,"goal-planner","Fresh acceptance-contract planner","Define an immutable, testable goal contract. Never implement.",["read","grep","find","ls","bash"],false),
-      registerAgent(pi,"goal-worker","Retained coding worker","Implement the supplied immutable contract. Return a completion candidate, never a verdict.",["read","grep","find","ls","bash","edit","write"],false),
+      registerAgent(pi,"goal-planner","Fresh acceptance-contract planner","Define an immutable, testable goal contract. Never implement.",["read","grep","find","ls","verify_command"],false,{subagentOnlyExtensions:[verifierToolPath]}),
+      registerAgent(pi,"goal-worker","Retained coding worker","Implement the supplied immutable contract. Return a completion candidate, never a verdict.",["read","grep","find","ls","worker_command","edit","write"],false,{subagentOnlyExtensions:[verifierToolPath]}),
       registerAgent(pi,"goal-skeptic","Fresh independent read-only verifier","Verify every criterion independently. Never mutate the workspace.",["read","grep","find","ls","verify_command"],false,{subagentOnlyExtensions:[verifierToolPath]}),
       registerAgent(pi,"goal-strategist","Fresh read-only remediation strategist","Change HOW, never WHAT. Never implement.",["read","grep","find","ls","verify_command"],false,{subagentOnlyExtensions:[verifierToolPath]}),
     ];
     loadPersisted();
   });
 
-  pi.events.on(ASYNC_COMPLETE, (raw) => {
+  pi.events.on(ASYNC_COMPLETE, async (raw) => {
     const data = raw as Record<string, unknown>;
     if (!active || (active.asyncRunId && data.runId !== active.asyncRunId)) return;
     loadPersisted();
     const ctx = lastContext;
-    if (ctx && active) ctx.ui.notify(statusText(active), "info");
+    if (ctx && active) {
+      if(active.missionId&&active.snapshot) await updateMissionLifecycle(ctx.cwd,active.missionId,active.snapshot);
+      ctx.ui.notify(statusText(active), "info");
+    }
   });
 
   pi.registerCommand("goal", {
@@ -133,8 +156,9 @@ export default function goalExtension(pi: ExtensionAPI) {
         if (!args || args === "status") { loadPersisted(); ctx.ui.notify(statusText(active), "info"); return; }
         if (args === "pause") {
           if (!active) { ctx.ui.notify("Aktif goal yok.","warning"); return; }
-          if (active.asyncRunId) await rpc(pi,"stop",{id:active.asyncRunId});
           loadPersisted(); await persistControlState(ctx,active,"paused");
+          if(active.missionId&&active.snapshot) await updateMissionLifecycle(ctx.cwd,active.missionId,active.snapshot);
+          if (active.asyncRunId) await rpc(pi,"stop",{id:active.asyncRunId});
           ctx.ui.notify("Goal duraklatıldı; worker kimliği ve mission state korundu.","info"); return;
         }
         if (args === "resume") {
@@ -144,8 +168,10 @@ export default function goalExtension(pi: ExtensionAPI) {
         }
         if (args === "clear") {
           if (!active) { ctx.ui.notify("Aktif goal yok.","warning"); return; }
+          loadPersisted(); await persistControlState(ctx,active,"cancelled");
+          if(active.missionId&&active.snapshot) await updateMissionLifecycle(ctx.cwd,active.missionId,active.snapshot);
           if (active.asyncRunId) await rpc(pi,"stop",{id:active.asyncRunId});
-          loadPersisted(); await persistControlState(ctx,active,"cancelled"); active=undefined;
+          active=undefined;
           ctx.ui.notify("Goal iptal edildi; geç sonuçlar generation guard ile geçersiz.","info"); return;
         }
         if (active && !["complete","cancelled"].includes(active.snapshot?.status ?? "")) { ctx.ui.notify("Önce aktif goal'ü clear edin veya tamamlanmasını bekleyin.","warning"); return; }

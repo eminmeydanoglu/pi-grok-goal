@@ -21,13 +21,15 @@ export interface VerificationVerdict { achieved: boolean; gaps: Gap[]; notes?: s
 export interface Strategy { diagnosis: string; recommendedStrategy: string; avoidRepeating: string[] }
 export interface GoalBudgets {
   tokenBudget: number; maxWorkerIterations: number; maxVerificationRounds: number;
-  maxStrategistInvocations: number; strategistThreshold: number; infraRetries: number;
+  maxStrategistInvocations: number; strategistThreshold: number; infraRetries: number; wallClockMs: number;
 }
 export interface GoalSnapshot {
   version: 1; goalId: string; generation: number; objective: string; status: GoalStatus;
   contract?: GoalContract; contractDigest?: string; workPlan: string[]; workerRunId?: string;
+  workerResumeRunId?: string; workerClaim?: WorkerClaim;
   workerIteration: number; verificationAttempt: number; verifierRunIds: string[];
   priorVerificationGaps: Gap[]; gapFingerprint?: string; sameGapCount: number;
+  verificationHistory?: { attempt: number; verifierRunIds: string[]; verdicts: VerificationVerdict[]; gaps: Gap[]; fingerprint: string }[];
   strategistCount: number; strategy?: Strategy; budgets: GoalBudgets;
   completionResult?: { independentlyVerified: true; at: string; verdicts: VerificationVerdict[] };
   pauseReason?: string; activeAsyncRunId?: string; updatedAt: string;
