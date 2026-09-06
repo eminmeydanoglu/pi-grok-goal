@@ -1,11 +1,19 @@
 import { Type } from "@sinclair/typebox";
 import { realpathSync } from "node:fs";
+import { resolve, relative } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const Params = Type.Object({argv:Type.Array(Type.String({minLength:1,maxLength:512}),{minItems:1,maxItems:32}),cwd:Type.Optional(Type.String({maxLength:1024}))},{additionalProperties:false});
 const ALLOWED = new Set(["node","npm","npx","git","python","python3","pytest","cargo"]);
 
 export default function verifierTools(pi: ExtensionAPI) {
+  pi.on("tool_call",(event,ctx)=>{
+    if(event.toolName!=="edit"&&event.toolName!=="write")return;
+    const raw=(event.input as {path?:unknown;file_path?:unknown}).path??(event.input as {file_path?:unknown}).file_path;
+    if(typeof raw!=="string")return;
+    const rel=relative(resolve(ctx.cwd),resolve(ctx.cwd,raw));
+    if(rel===".git"||rel.startsWith(`.git/`)||rel.startsWith(`.git\\`))return{block:true,reason:"Worker policy forbids modifying Git metadata",terminate:false};
+  });
   pi.registerTool({name:"verify_command",label:"Read-only verification command",description:"Run argv without a shell in a Bubblewrap namespace where the host filesystem is read-only and only isolated /tmp is writable.",parameters:Params,
     execute:async(_id,params,signal,_onUpdate,ctx)=>{
       const [executable,...args]=params.argv;
